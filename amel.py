@@ -1,0 +1,313 @@
+# main.py -- ESP32 Realtime Monitoring Dashboard (ONE FILE ONLY) - Enhanced Version
+import network, time, socket, json
+from machine import Pin
+from dht import DHT11
+
+SSID = "Lab Telkom"
+PASSWORD = ""
+
+# WiFi Connect
+def connect_wifi():
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    if not wlan.isconnected():
+        print("Connecting WiFi...")
+        wlan.connect(SSID, PASSWORD)
+        while not wlan.isconnected(): time.sleep(1)
+    print("Connected:", wlan.ifconfig()[0])
+    return wlan.ifconfig()[0]
+
+ip = connect_wifi()
+
+sensor = DHT11(Pin(4))
+temp, humidity = 0, 0
+last_read = 0
+
+# Data history untuk grafik (simpan 30 data terakhir)
+history = {"times": [], "temps": [], "humidities": []}
+
+# HALAMAN HTML - Enhanced dengan styling lebih baik, grafik dual, dan fitur tambahan
+DASHBOARD = """HTTP/1.1 200 OK
+Content-Type: text/html
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Realtime Monitoring Ruangan</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+:root{
+    --bg:#e8f4fd; /* Biru langit muda cerah */
+    --panel:#ffffff; /* Putih untuk panel */
+    --muted:#7f8c8d; /* Abu-abu sedang */
+    --text:#2c3e50; /* Biru gelap untuk teks */
+    --cyan:#00bcd4; /* Cyan cerah */
+    --purple:#9c27b0; /* Ungu cerah */
+    --card-border:rgba(0,0,0,0.1); /* Border lembut */
+    --danger:#f44336; /* Merah cerah */
+    --warning:#ff9800; /* Orange cerah */
+    --success:#4caf50; /* Hijau cerah */
+}
+html,body{height:100%;margin:0;padding:0;background:url('https://source.unsplash.com/featured/?mountain') no-repeat center center fixed;background-size:cover;color:var(--text);font-family:Inter, Arial, sans-serif;}
+/* Overlay untuk readability dengan opacity lebih rendah untuk kesan cerah */
+body::before{content:'';position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(232,244,253,0.6);z-index:-1;}
+.wrap{max-width:920px;margin:28px auto;padding:20px;}
+.header{display:flex;align-items:center;gap:18px;margin-bottom:18px;}
+.icon{width:72px;height:72px;border-radius:14px;background:linear-gradient(180deg, rgba(255,255,255,0.8), rgba(255,255,255,0.4));display:flex;align-items:center;justify-content:center;border:1px solid rgba(0,0,0,0.1);}
+.icon img{width:56px;height:56px;object-fit:contain;filter: drop-shadow(0 6px 20px rgba(0,0,0,0.2));}
+.title{font-size:34px;margin:0;color:var(--text);}
+.meta{color:var(--muted);margin-top:6px;font-size:14px;}
+.grid{display:flex;gap:18px;margin-top:18px;flex-wrap:wrap;}
+.card{flex:1 1 48%;background:linear-gradient(180deg,var(--panel), #f8f9fa);padding:20px;border-radius:12px;border:1px solid var(--card-border);box-sizing:border-box;box-shadow:0 4px 12px rgba(0,0,0,0.1);}
+.label{color:var(--muted);font-size:16px;margin-bottom:8px;}
+.val{font-size:56px;font-weight:700;color:var(--text);}
+.status-card{flex:1 1 100%;margin-top:16px;padding:18px;display:flex;align-items:center;justify-content:flex-start;gap:12px;}
+.status{font-size:28px;font-weight:700;color:var(--cyan);}
+.small-muted{color:var(--muted);margin-top:8px;font-size:13px;}
+.chart-wrap{margin-top:22px;background:linear-gradient(180deg,var(--panel), #f8f9fa);padding:18px;border-radius:12px;border:1px solid var(--card-border);box-shadow:0 4px 12px rgba(0,0,0,0.1);}
+canvas{width:100% !important;height:420px !important;}
+.legend{display:flex;gap:18px;align-items:center;margin-top:12px;color:var(--muted);}
+.footer{text-align:center;color:var(--muted);margin-top:18px;font-size:13px;}
+@media (max-width:800px){.val{font-size:44px}.header{flex-direction:column;align-items:flex-start;gap:8px}.grid{flex-direction:column}}
+</style>
+</head>
+<body>
+<div class="wrap">
+    <div class="header">
+        <div class="icon"><img src="https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQyZiQ61hRsABFpQeg0bjL6PxF1c2g1LwKjfA&s" alt="icon" onerror="this.style.display='none'"></div>
+        <div>
+            <div class="title">Monitoring Ruangan</div>
+            <div class="meta">Meta 8 · Kelas 12 SIJA · SMKN 1 GEDANGAN</div>
+        </div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <div class="label">Suhu</div>
+            <div id="t" class="val">--°C</div>
+            <div class="small-muted">Kisaran normal: 25°C - 32°C</div>
+        </div>
+        <div class="card">
+            <div class="label">Kelembapan Udara</div>
+            <div id="h" class="val">--%</div>
+            <div class="small-muted">Ideal: 40% - 60%</div>
+        </div>
+    </div>
+
+    <div class="status-card card">
+        <div>
+            <div class="label">Status Ruangan</div>
+            <div id="st" class="status">Memeriksa...</div>
+            <div class="small-muted" id="stHint"></div>
+        </div>
+    </div>
+
+    <div class="chart-wrap">
+        <div style="font-size:18px;margin-bottom:8px;color:var(--text);">Grafik Realtime (30 Data Terakhir)</div>
+        <canvas id="chart"></canvas>
+        <div class="legend">
+            <div><span class="dot" style="width:10px;height:4px;border-radius:4px;display:inline-block;background:linear-gradient(90deg,var(--cyan), var(--purple));"></span> Suhu (°C)</div>
+            <div><span class="dot" style="width:10px;height:4px;border-radius:4px;display:inline-block;background:linear-gradient(90deg,var(--purple), var(--cyan));"></span> Kelembapan Udara (%)</div>
+        </div>
+    </div>
+
+    <div class="footer">Data berasal dari sensor DHT11. Device IP: """ + ip + """ | Update setiap 1 detik</div>
+</div>
+
+<script>
+const tEl = document.getElementById("t");
+const hEl = document.getElementById("h");
+const stEl = document.getElementById("st");
+const stHintEl = document.getElementById("stHint");
+const labels = [], temps = [], humidities = [];
+const ctx = document.getElementById("chart").getContext('2d');
+const gradT = ctx.createLinearGradient(0,0,ctx.canvas.width,0);
+gradT.addColorStop(0, getComputedStyle(document.documentElement).getPropertyValue('--cyan').trim() || '#00bcd4');
+gradT.addColorStop(1, getComputedStyle(document.documentElement).getPropertyValue('--purple').trim() || '#9c27b0');
+const gradH = ctx.createLinearGradient(0,0,ctx.canvas.width,0);
+gradH.addColorStop(0, getComputedStyle(document.documentElement).getPropertyValue('--purple').trim() || '#9c27b0');
+gradH.addColorStop(1, getComputedStyle(document.documentElement).getPropertyValue('--cyan').trim() || '#00bcd4');
+const chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+        labels: labels,
+        datasets: [
+            {
+                label: 'Suhu (°C)',
+                data: temps,
+                borderColor: gradT,
+                backgroundColor: 'rgba(0,188,212,0.2)',  // Lebih opaque untuk area fill
+                pointRadius: 3,  // Titik kecil untuk visibilitas
+                pointBackgroundColor: gradT,
+                pointBorderColor: '#ffffff',
+                pointBorderWidth: 2,
+                tension: 0.4,  // Smooth curve
+                fill: true,  // Fill area
+                yAxisID: 'y'
+            },
+            {
+                label: 'Kelembapan Udara (%)',
+                data: humidities,
+                borderColor: gradH,
+                backgroundColor: 'rgba(156,39,176,0.2)',  // Lebih opaque
+                pointRadius: 3,
+                pointBackgroundColor: gradH,
+                pointBorderColor: '#ffffff',
+                pointBorderWidth: 2,
+                tension: 0.4,
+                fill: true,
+                yAxisID: 'y2'
+            }
+        ]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { 
+            duration: 800,  // Animasi smooth 800ms
+            easing: 'easeInOutQuart'  // Easing halus
+        },
+        interaction: { 
+            mode: 'index', 
+            intersect: false 
+        },
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                backgroundColor: 'rgba(255,255,255,0.95)',
+                titleColor: 'var(--text)',
+                bodyColor: 'var(--text)',
+                borderColor: 'var(--card-border)',
+                borderWidth: 1,
+                cornerRadius: 8,
+                displayColors: true,
+                callbacks: {
+                    label: function(context) {
+                        return context.dataset.label + ': ' + context.parsed.y + (context.datasetIndex === 0 ? '°C' : '%');
+                    }
+                }
+            }
+        },
+        scales: {
+            x: {
+                grid: { color: 'rgba(0,0,0,0.1)' },
+                ticks: { color: 'var(--muted)' },
+                display: true
+            },
+            y: {
+                position: 'left',
+                grid: { color: 'rgba(0,0,0,0.05)' },
+                ticks: { color: 'var(--muted)' },
+                title: {
+                    display: true,
+                    text: 'Suhu (°C)',
+                    color: 'var(--muted)'
+                }
+            },
+            y2: {
+                position: 'right',
+                grid: { display: false },
+                ticks: { color: 'var(--muted)' },
+                title: {
+                    display: true,
+                    text: 'Kelembapan (%)',
+                    color: 'var(--muted)'
+                }
+            }
+        },
+        elements: {
+            point: {
+                hoverRadius: 6,  // Hover effect pada titik
+                hoverBorderWidth: 3
+            }
+        }
+    }
+});
+
+async function update(){
+    try{
+        let res = await fetch("/data");
+        let d = await res.json();
+        tEl.innerHTML = d.temp + "°C";
+        hEl.innerHTML = d.humidity + "%";
+        // Logic status kombinasi suhu + humidity
+        function setStatus(text, color, hint){
+            stEl.textContent = text;
+            stEl.style.color = color || 'var(--cyan)';
+            stHintEl.textContent = hint || '';
+        }
+        if (d.temp > 30 || d.humidity < 30 || d.humidity > 70){
+            setStatus('BAHAYA', 'var(--danger)', 'Periksa segera (suhu/kelembapan kritis)');
+        } else if (d.temp >= 26 || d.humidity < 40 || d.humidity > 60){
+            setStatus('WASPADA', 'var(--warning)', 'Perhatikan ventilasi/humidifier');
+        } else {
+            setStatus('AMAN', 'var(--success)', 'Suhu dan kelembapan stabil');
+        }
+        labels.push(d.time);
+        temps.push(d.temp);
+        humidities.push(d.humidity);
+        if(labels.length > 30){ labels.shift(); temps.shift(); humidities.shift(); }
+        chart.update('active');  // Update dengan mode 'active' untuk animasi
+    } catch(e){
+        console.log("Update error:", e);
+        // Fallback jika fetch gagal
+        stEl.textContent = "Error Koneksi";
+        stEl.style.color = 'var(--danger)';
+    }
+}
+setInterval(update, 1000);
+</script>
+</body>
+</html>
+"""
+
+# SERVER
+addr = socket.getaddrinfo("0.0.0.0",80)[0][-1]
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(addr)
+s.listen(1)
+print("Open browser → http://%s" % ip)
+
+while True:
+    cl, addr = s.accept()
+    req = cl.recv(512)
+    req = str(req)
+
+    if "/data" in req:
+        if time.time() - last_read >= 2:  # Update sensor setiap 2 detik untuk menghindari overload DHT11
+            try:
+                sensor.measure()
+                temp = sensor.temperature()
+                humidity = sensor.humidity()
+                # Simpan ke history
+                now = time.localtime()
+                time_str = "%02d:%02d:%02d" % (now[3], now[4], now[5])
+                history["times"].append(time_str)
+                history["temps"].append(temp)
+                history["humidities"].append(humidity)
+                if len(history["times"]) > 30:
+                    history["times"].pop(0)
+                    history["temps"].pop(0)
+                    history["humidities"].pop(0)
+            except Exception as e:
+                print("Sensor error:", e)
+            last_read = time.time()
+
+        now = time.localtime()
+        data = {
+            "temp": temp,
+            "humidity": humidity,
+            "time": "%02d:%02d:%02d" % (now[3], now[4], now[5])  # Tambah detik untuk presisi
+        }
+        cl.send("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")
+        cl.send(json.dumps(data))
+    elif "/icon" in req:
+        # Placeholder untuk icon (jika ada file, bisa serve seperti sebelumnya)
+        cl.send("HTTP/1.1 404 Not Found\r\n\r\n")
+    else:
+        cl.send(DASHBOARD)
+
+    cl.close()
